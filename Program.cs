@@ -12,6 +12,7 @@ builder.Services.AddSwaggerGen();
 
 // Mapeia as controllers da aplicação
 builder.Services.AddControllers();
+builder.Services.AddScoped<JwtService>();
 
 var app = builder.Build();
 

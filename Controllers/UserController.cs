@@ -1,25 +1,23 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
-using System;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
-using System.Threading.Tasks;
 using Login.Models;
-using Microsoft.AspNetCore.Authorization;
-using System.Linq;
+using BCrypt.Net;
 
 public class UserController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
+    private readonly JwtService _jwtService;
     private readonly IConfiguration _configuration;
 
-    public UserController(AppDbContext dbContext, IConfiguration configuration)
+    public UserController(AppDbContext dbContext, IConfiguration configuration, JwtService jwtService)
     {
         _dbContext = dbContext;
         _configuration = configuration;
+        _jwtService = jwtService;
     }
 
     [HttpPost("/register")]
@@ -27,6 +25,12 @@ public class UserController : ControllerBase
     {
         if (user != null)
         {
+            // Verifica se o email e o email de confirmação correspondem
+            if (user.Email != user.EmailConfirmed)
+            {
+                return BadRequest("O email e o email de confirmação não correspondem.");
+            }
+
             // Verifica se já existe um usuário com o mesmo email
             var existingUser = await _dbContext.Users.FirstOrDefaultAsync(u => u.Email == user.Email);
             if (existingUser != null)
@@ -34,18 +38,17 @@ public class UserController : ControllerBase
                 return BadRequest($"O email '{user.Email}' já está sendo usado por outro usuário.");
             }
 
-            // Verifica se outra conta já está usando a senha
-            var existingUserWithPassword = await _dbContext.Users.FirstOrDefaultAsync(u => u.Password == user.Password);
-            if (existingUserWithPassword != null)
-            {
-                return BadRequest($"A senha já está sendo usada por outro usuário. O email associado é '{existingUserWithPassword.Email}'.");
-            }
+            // Criptografa a senha antes de salvar
+            string hashedPassword = BCrypt.Net.BCrypt.HashPassword(user.Password);
+
+            // Substitui a senha do usuário pela versão criptografada
+            user.Password = hashedPassword;
 
             // Adiciona o novo usuário ao contexto
             _dbContext.Users.Add(user);
 
             // Salva as alterações no contexto
-            await _dbContext.SaveChangesAsync();
+            await _dbContext.SaveChangesAsync(); // Aqui está a chamada para salvar as alterações
 
             // Retorna a resposta de sucesso
             return Created($"/users/{user.Id}", user);
@@ -56,40 +59,22 @@ public class UserController : ControllerBase
         }
     }
 
-
     [HttpPost("/login")]
     public async Task<IActionResult> Login([FromBody] LoginRequest loginRequest)
     {
-        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.Email == loginRequest.Email && u.Password == loginRequest.Password);
+        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.Email == loginRequest.Email);
 
         if (user == null)
             return Unauthorized("Credenciais inválidas.");
 
-        var token = GenerateJwtToken(user);
+        // Verifica se a senha fornecida corresponde à senha armazenada após descriptografar
+        if (!BCrypt.Net.BCrypt.Verify(loginRequest.Password, user.Password))
+            return Unauthorized("Credenciais inválidas.");
+
+        var token = _jwtService.GenerateJwtToken(user);
         return Ok(new { Token = token });
     }
     
-    
-    private string GenerateJwtToken(User user)
-    {
-        var tokenHandler = new JwtSecurityTokenHandler();
-        var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Secret"]);
-
-        var tokenDescriptor = new SecurityTokenDescriptor
-        {
-            Subject = new ClaimsIdentity(new Claim[]
-            {
-                new Claim(ClaimTypes.Name, user.Email),
-                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            }),
-            Expires = DateTime.UtcNow.AddHours(1),
-            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
-        };
-
-        var token = tokenHandler.CreateToken(tokenDescriptor);
-        return tokenHandler.WriteToken(token);
-    }
-
     [HttpPost("/claims")]
     public async Task<IActionResult> GetUserInfo([FromBody] TokenRequest tokenRequest)
         {
